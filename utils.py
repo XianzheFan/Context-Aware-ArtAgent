@@ -33,15 +33,26 @@ glm_model = None
 # glm_model = glm_model.eval()
 
 
-def gpt4_predict(input, chatbot, history):
+def write_json(userID, output):
+    with open('output/' + str(userID) + '.json', 'a', encoding='utf-8') as f:
+        json.dump(output, f, ensure_ascii=False)  # False，可保存utf-8编码
+        f.write('\n')
+
+
+# 需要使用能够逐行解析文件的程序，每次读取并解析一行
+def gpt4_predict(input, chatbot, history, userID):
     """ input 是 gr.textbox(), history 是 List """
     chatbot.append((parse_text(input), ""))
-    history.append(construct_user(str(input)))
+    user_output = construct_user(str(input))
+    history.append(user_output)
 
     res = gpt4_api(ART_ADVICE, history)
-    history.append(construct_assistant(res))
-    print(history)
+    assistant_output = construct_assistant(res)
+    history.append(assistant_output)
 
+    write_json(userID, user_output)
+    write_json(userID, assistant_output)
+    print(history)
     chatbot[-1] = (parse_text(input), parse_text(res))
     yield chatbot, history
 
@@ -57,6 +68,12 @@ def construct_system(text):
 
 def construct_assistant(text):
     return construct_text("assistant", text)
+
+def construct_prompt(text):
+    return construct_text("prompt", text)
+
+def construct_photo(text):
+    return construct_text("photo", text)
 
 
 def gpt4_api(system, history):
@@ -79,22 +96,15 @@ def reset_user_input():
     return gr.update(value='')
 
 
-def reset_state(chatbot):
+def reset_state(chatbot, userID):
     chatbot.append((parse_text("我想开启一个新的绘画主题。"), parse_text("好的，您想创作什么主题的画呢？")))
+    write_json(userID, construct_user("我想开启一个新的绘画主题。"))
+    write_json(userID, construct_assistant("好的，您想创作什么主题的画呢？"))
     yield chatbot, [], 0
 
 
 def clear_gallery():
     return [], []
-
-
-def wrong_image(chatbot, history, cnt):
-    if cnt > 0:
-        chatbot.append((parse_text("这张图和我的想法不一致，请修改描述。"), parse_text("抱歉，我会重新修改描述，生成新的图像。")))
-        history.append(construct_user("这张图和我的想法不一致，请修改描述。"))
-        history.append(construct_assistant("抱歉，我会重新修改描述，生成新的图像。"))
-    cnt = cnt + 1
-    yield chatbot, history, cnt
 
 
 """Override Chatbot.postprocess"""
@@ -143,6 +153,18 @@ def parse_text(text):  # 便于文本以html形式显示
 
 
 def process_and_save_image(np_image, userID):
+    # 如果输入图像不是numpy数组，则进行转换
+    if not isinstance(np_image, np.ndarray):
+        np_image = np.array(np_image)
+        
+    # 确保我们有一个有效的numpy数组
+    if np_image is None:
+        raise ValueError("Image processing failed and resulted in None.")
+    
+    # 如果numpy数组不是uint8类型，则进行转换
+    if np_image.dtype != np.uint8:
+        np_image = np_image.astype(np.uint8)
+        
     # 首先，确保numpy数组是uint8类型，且值在0-255范围内
     assert np_image.dtype == np.uint8
     assert np_image.min() >= 0
@@ -152,10 +174,17 @@ def process_and_save_image(np_image, userID):
     img = Image.fromarray(np_image)
     
     # 将图像保存到指定路径
+    img_path = 'output/' + time.strftime("%Y-%m-%d-%H-%M-%S-", time.localtime()) + str(random.randint(1000, 9999)) + "-upload-"  + str(userID) + '.png'
+    write_json(userID, construct_photo(img_path))
+    img.save(img_path)
     img.save("output/edit-" + str(userID) + ".png")
 
 
 def read_image(img, chatbot, history, userID):
+    # 如果输入图像是PIL图像，将其转换为numpy数组
+    if isinstance(img, Image.Image):
+        img = np.array(img)
+        
     process_and_save_image(img, userID)
     chatbot.append((parse_text("请对这张图片给出建议。"), ""))
 
@@ -166,21 +195,26 @@ def read_image(img, chatbot, history, userID):
 
     history.append(construct_user("请对这张图片给出建议。"))
     history.append(construct_assistant(response))
+    write_json(userID, construct_user("请对这张图片给出建议。"))
+    write_json(userID, construct_assistant(response))
     print(history)
     yield chatbot, history
 
 
-def gpt4_sd_edit(chatbot, history, result_list, userID, cnt, step, cfg_scale, width, height):
+def gpt4_sd_edit(chatbot, history, result_list, userID, cnt, width, height):
     if cnt > 0:
         chatbot.append((parse_text("这张图和我的想法不一致，请修改描述。"), parse_text("抱歉，我会重新修改描述，生成新的图像。")))
         history.append(construct_user("这张图和我的想法不一致，请修改描述。"))
         history.append(construct_assistant("抱歉，我会重新修改描述，生成新的图像。"))
+        write_json(userID, construct_user("这张图和我的想法不一致，请修改描述。"))
+        write_json(userID, construct_assistant("抱歉，我会重新修改描述，生成新的图像。"))
     cnt = cnt + 1
 
     image_path = "output/edit-" + str(userID) + ".png"
     pos_prompt = gpt4_api(CN_TXT2IMG_PROMPT, history)
     print(pos_prompt)
-    new_images = controlnet_txt2img_api(image_path, pos_prompt, userID, step, cfg_scale, width, height, )
+    write_json(userID, construct_prompt(pos_prompt))
+    new_images = controlnet_txt2img_api(image_path, pos_prompt, userID, width, height)
     
     # 仅保存第一张图片
     if new_images:  # 检查列表是否为空
@@ -198,15 +232,15 @@ def encode_pil_to_base64(image):
     return base64.b64encode(bytes_data).decode("utf-8")
 
 
-def controlnet_txt2img_api(image_path, pos_prompt, userID, step, cfg_scale, width, height, sampler="DPM++ 2M Karras", cn_module="canny", cn_model="control_v11p_sd15_canny [d14c016b]"):
+def controlnet_txt2img_api(image_path, pos_prompt, userID, width, height, sampler="DPM++ 2M Karras", cn_module="canny", cn_model="control_v11p_sd15_canny [d14c016b]"):
     controlnet_image = Image.open(image_path)
     controlnet_image_data = encode_pil_to_base64(controlnet_image)
     txt2img_data = {
         "prompt": "((masterpiece, best quality, ultra-detailed, illustration))" + pos_prompt,
         "sampler_name": sampler,  # Euler也可
         "batch_size": 1,
-        "step": step,
-        "cfg_scale": cfg_scale,
+        "step": 32,
+        "cfg_scale": 7,
         "width": width,
         "height": height,
         "enabled": True,
@@ -233,15 +267,19 @@ def controlnet_txt2img_api(image_path, pos_prompt, userID, step, cfg_scale, widt
     for i in r['images']:
         image = Image.open(io.BytesIO(base64.b64decode(i.split(",",1)[0])))
         image_list.append(image)
-        image.save('output/'+ time.strftime("%Y-%m-%d-%H-%M-%S-", time.localtime()) + str(random.randint(1000, 9999)) + "-cn-"  + str(userID) + '.png')
+        output_path = 'output/' + time.strftime("%Y-%m-%d-%H-%M-%S-", time.localtime()) + str(random.randint(1000, 9999)) + "-cn-"  + str(userID) + '.png'
+        image.save(output_path)
+        write_json(userID, construct_photo(output_path))
     return image_list
 
 
-def gpt4_sd_draw(chatbot, history, result_list, userID, cnt, step, cfg_scale, width, height):
+def gpt4_sd_draw(chatbot, history, result_list, userID, cnt, width, height):
     if cnt > 0:
         chatbot.append((parse_text("这张图和我的想法不一致，请修改描述。"), parse_text("抱歉，我会重新修改描述，生成新的图像。")))
         history.append(construct_user("这张图和我的想法不一致，请修改描述。"))
         history.append(construct_assistant("抱歉，我会重新修改描述，生成新的图像。"))
+        write_json(userID, construct_user("这张图和我的想法不一致，请修改描述。"))
+        write_json(userID, construct_assistant("抱歉，我会重新修改描述，生成新的图像。"))
     cnt = cnt + 1
 
     image_path = "output/edit-" + str(userID) + ".png"
@@ -249,73 +287,27 @@ def gpt4_sd_draw(chatbot, history, result_list, userID, cnt, step, cfg_scale, wi
     print(f"pos_prompt: {pos_prompt}")
     neg_prompt = gpt4_api(TXT2IMG_NEG_PROMPT, history)
     print(f"neg_prompt: {neg_prompt}")
-    new_images = call_sd_t2i(userID, pos_prompt, neg_prompt, width, height, step, cfg_scale)
+    write_json(userID, construct_prompt(pos_prompt + "\n" + neg_prompt))
+    new_images = call_sd_t2i(userID, pos_prompt, neg_prompt, width, height)
     
     new_image = new_images[0]
     new_image.save(os.path.join(image_path))  # 暂时存成edit.png
     result_list = [new_image] + result_list
 
     chatbot.append((parse_text("请基于之前的艺术讨论生成图片。"), ""))
-    # response = gpt4_api(TRANLATE_IMAGE, pos_prompt)  # 不要直译了
     response = "图像生成完毕。\n\n" + call_visualglm_api(np.array(new_image))["result"]
 
     chatbot[-1] = (parse_text("请基于之前的艺术讨论生成图片。"), parse_text(response)) 
     history.append(construct_user("请基于之前的艺术讨论生成图片。"))
     history.append(construct_assistant(response))
+    write_json(userID, construct_user("请基于之前的艺术讨论生成图片。"))
+    write_json(userID, construct_assistant(response))
     print(history)
 
     yield chatbot, history, result_list, new_images, cnt, result_list
 
 
-def wrapper_gpt4_sd_draw(*args, **kwargs):
-    # 用来处理生成器的函数
-    generator = gpt4_sd_draw(*args, **kwargs)
-    results = []
-    for result in generator:
-        results.append(result)
-    return results
-
-
-def translate_by_glm(word):
-    for p in ["！", "，"]:
-            word = word.replace(p, "。")
-    words = word.split("。")
-    trans_result = ""
-    for word in words:
-        word = word.strip()
-        if len(word) > 0:
-            trans_result += call_glm_api("翻译："+ word, [], 1024, 0.6, 0.9)["response"].strip()              
-    return trans_result
-
-
-def translate_by_youdao(word):
-    trans_result = ''
-    url = 'http://fanyi.youdao.com/translate?smartresult=dict&smartresult=rule&smartresult=ugc&sessionFrom=null'
-    key = {
-        # 'type': "AUTO",
-        'from': "zh-CHS",
-        'to': "en",
-        'i': word,
-        "doctype": "json",
-        "version": "2.1",
-        "keyfrom": "fanyi.web",
-        "ue": "UTF-8",
-        "action": "FY_BY_CLICKBUTTON",
-        "typoResult": "true"
-    }
-    response = requests.post(url, data=key)
-    if response.status_code == 200:
-        list_trans = response.text
-        result = json.loads(list_trans)
-        for r in result['translateResult'][0]:
-            trans_result += r['tgt']
-    else:
-        print(response.status_code)
-        return word
-    return trans_result
-
-
-def call_sd_t2i(userID, pos_prompt, neg_prompt, width, height, steps, cfg, user_input=""):
+def call_sd_t2i(userID, pos_prompt, neg_prompt, width, height, user_input=""):
     url = "http://127.0.0.1:6016"
     payload = {
         "enable_hr": False,  # True画质更好但更慢
@@ -323,9 +315,9 @@ def call_sd_t2i(userID, pos_prompt, neg_prompt, width, height, steps, cfg, user_
         "hr_scale": 1.5,
         "hr_upscaler": "Latent",
         "prompt": "((masterpiece, best quality, ultra-detailed, illustration))" + pos_prompt,
-        "steps": steps,
+        "steps": 32,
         "negative_prompt": "nsfw, (EasyNegative:0.8), (badhandv4:0.8), (missing fingers, multiple legs, multiple hands), (worst quality, low quality, extra digits, loli, loli face:1.2), " + neg_prompt + ", lowres, blurry, text, logo, artist name, watermark",
-        "cfg_scale": cfg,
+        "cfg_scale": 7,
         "batch_size": 1,
         "n_iter": 1,
         "width": width,
@@ -340,7 +332,9 @@ def call_sd_t2i(userID, pos_prompt, neg_prompt, width, height, steps, cfg, user_
     for i in r['images']:
         image = Image.open(io.BytesIO(base64.b64decode(i.split(",",1)[0])))
         image_list.append(image)
-        image.save('output/'+ time.strftime("%Y-%m-%d-%H-%M-%S-", time.localtime()) + str(user_input[:12]) + "-" + str(userID) +'.png')
+        output_path = 'output/'+ time.strftime("%Y-%m-%d-%H-%M-%S-", time.localtime()) + str(user_input[:12]) + "-" + str(userID) +'.png'
+        image.save(output_path)
+        write_json(userID, construct_photo(output_path))
 
     return image_list
 
@@ -362,178 +356,3 @@ def call_visualglm_api(img, history=[]):
     response = requests.post(url, json=payload)
     response = response.json()
     return response
-
-
-# 暂时不用
-def call_glm_api(prompt, history, max_length, top_p, temperature):
-    url = "http://127.0.0.1:8000"
-    payload = {
-        "prompt": prompt,
-        "history": history,
-        "max_length": max_length,
-        "top_p": top_p,
-        "temperature": temperature
-    }
-    response = requests.post(url, json=payload)
-    response = response.json()
-    # print(response)
-    return response
-
-
-# 暂时不用
-def gen_image_description(user_input, chatbot, max_length, top_p, temperature, history, file_handle, from_api=True):
-    # TODO 4.1
-    def get_respond(prompt_history, prompt_input):
-        if not from_api:
-            response = ""
-            for response_, history_ in glm_model.stream_chat(glm_tokenizer, prompt_input, prompt_history, max_length=max_length, top_p=top_p,
-                                                temperature=temperature):
-                response = response_
-        else:
-            response = call_glm_api(prompt_input, prompt_history, max_length, top_p, temperature)["response"]
-        return response
-    def write_log():
-        file_handle.write("="*20 + "\n")
-        file_handle.write("prompt_history:" + str(prompt_history) + "\n")
-        file_handle.write("prompt_input:" + prompt_input + "\n")
-        file_handle.write("response:" + response + "\n\n")
-        file_handle.write("="*20+ "\n")
-
-    # Step1 名词解释
-    prompt_history = [["我接下来会给你一些名词，请你依次给出它们的解释。","好的，请给我一些指令。"]]
-    prompt_input = str(f"名词解释：“{user_input}”，请详细解释这些词，并添加一些形象和内容以丰富细节，不要输出多余的信息")
-    response = get_respond(prompt_history, prompt_input)
-    print("Step1", response)
-    write_log()
-
-    # Step2 元素提取和总结
-    prompt_history.append([prompt_input, response])
-    prompt_input = str(f"请总结归纳你刚刚的解释，并为其添加一些视觉上的元素和细节，不要输出多余的信息。")
-    response = get_respond(prompt_history, prompt_input)
-    print("Step2", response)
-    write_log()
-
-    # Step3 作画素材
-    prompt_history = [["我接下来会给你一些作画的指令，你只要回复出作画内容及对象，不需要你作画，不需要给我参考，请直接给出作画内容，不要输出不必要的内容，你只需回复作画内容。你听懂了吗", "听懂了。请给我一些作画的指令。"]]
-    prompt_input = str(f"我现在要画一副画，这幅画关于：{response}。请帮我详细描述作画中的画面构图、画面主体和画面背景，并添加一些内容以丰富细节。回答中不要包含这一句话")
-    response = get_respond(prompt_history, prompt_input)
-    print("Step3", response)
-    write_log()
-
-    # 检测
-    # retry_count = 0
-    # check = get_respond([], str(f"这里有一段描述，{response}，这段描述是关于一个场景的吗？你仅需要回答“是”或“否”。"))
-    # print("CHECK", check)
-    # while ("不是" in check or "是" not in check) and retry_count < 3:
-    #     response = get_respond(prompt_history, prompt_input)
-    #     check = get_respond([], str(f"这里有一段描述，{response}，这段描述是关于一个场景、物体、动物或人物的吗？你仅需要回答“是”或“否”。"))
-    #     retry_count += 1
-
-    # if "不是" in check or "是" not in check:
-    #     response = "抱歉, 我还不知道该怎么画，我可能需要更多学习。"
-    #     chatbot.append((parse_text(user_input), parse_text(response)))
-    #     history.append([chatbot[-1][0], chatbot[-1][1]])
-    #     return chatbot, history, parse_text(response), "FAILED"
-
-    chatbot.append((parse_text("请帮我画："+user_input), parse_text(response)))
-    history.append([chatbot[-1][0], chatbot[-1][1]])
-
-    # Step4 作画素材
-    prompt_history = [["下面我将给你一段话，请你帮我抽取其中的图像元素，忽略其他非图像的描述，将抽取结果以逗号分隔，一定不要输出多余的内容和符号","听懂了，请给我一段文字。"]]
-    prompt_input = str(f"以下是一段描述，抽取其中包括{TAG_STRING}的图像元素，忽略其他非图像的描述，将抽取结果以逗号分隔：{response}。 {user_input}")
-    response = get_respond(prompt_history, prompt_input)
-    print("Step4", response)
-    write_log()
-
-    # print(history[-1])
-    return chatbot, history, parse_text(response) + "\n" + chatbot[-1][1], "SUCCESS"
-
-
-# 暂时不用
-def sd_predict(user_input, chatbot, max_length, top_p, temperature, history, width, height, steps, cfg, result_list, userID):
-    file_handle = open('output/'+ time.strftime("%Y-%m-%d-%H-%M-%S-", time.localtime()) + str(user_input[:12]) + '.txt', 'w', encoding="utf8")
-    
-    # Step 1 use ChatGLM-6B associate image description
-    # !!! Currently, we don't take history into consideration
-    chatbot, history, image_description, code = gen_image_description(user_input, chatbot, max_length, top_p, temperature, history, file_handle)
-
-    if code != "SUCCESS":
-        yield chatbot, history, result_list, result_list
-    else:
-        # image_description = history[-1][1]
-        # image_description = str("").join(image_description.split('\n')[1:])
-        # stop_words = ["好的", "我", "将", "会", "画作", "关于", "一张", "画"]
-        stop_words = ["\t", "\r", '-', '*', '·', "<br>"]
-        for word in stop_words:
-            image_description = image_description.replace(word, "\n")
-        image_description += "\n"
-        # print(image_description)
-        tag_dict = {}
-
-        # base on re        
-        # for tag_class in TAG_CLASSES + ["构图", "主体", "背景", "内容"]:
-        #     pat = r'{}：.*[\n]'.format(tag_class)
-        #     # print(pat)
-        #     pat = re.compile( pat)
-        #     find = pat.findall(image_description)
-        #     if len(find) > 0:
-        #         if "不清楚" not in find[0] and "无" not in find[0] and "没有描述" not in find[0] and "不知道" not in find[0] and len(find[0]) > 1:
-        #             tag_dict[tag_class] = find[0][len(tag_class) + 1: -1]
-        
-        # base on find
-        TAG_CLASSES_ = TAG_CLASSES + SIMI_TAG_CLASSES
-        tag_pos_dict = {}
-        for t in TAG_CLASSES_:
-            pos = image_description.find(t+"：")
-            if pos != -1:
-                tag_pos_dict[t] = pos
-        tag_pos_dict = sorted(tag_pos_dict.items(), key = lambda kv:(kv[1], kv[0]))
-        tag_pos_dict = [(index, a[0], a[1]) for index, a in enumerate(tag_pos_dict)] + [(len(tag_pos_dict), "", len(image_description))]
-        print(tag_pos_dict)
-        for index in range(len(tag_pos_dict) - 1):
-            l = tag_pos_dict[index][2] + len(tag_pos_dict[index][1]) + 1
-            r = tag_pos_dict[index+1][2]
-            tmp = image_description[l:r]
-            if "不清楚" not in tmp and "无" not in tmp and "没有描述" not in tmp and "不知道" not in tmp and "未指定" not in tmp:
-                tmp = tmp.replace('\n', "")
-                tag_dict[tag_pos_dict[index][1]] = tmp
-
-        print(tag_dict)
-        file_handle.write(str(tag_dict) + "\n")
-        
-        if len(tag_dict) <= 1:
-            for word in TAG_CLASSES + ["\n", "\t", "\r", "<br>"] + ["根据描述无法识别", "无", "没有描述", "不知道", "不清楚"]:
-                image_description = image_description.replace(word, ", ")
-            tag_dict["其他"] = image_description
-            print(tag_dict)
-        
-        tag_dict = dict([(tag, translate_by_youdao(tag_dict[tag]).lower() if tag in TAG_CLASSES else translate_by_youdao(tag_dict[tag]).lower()) for tag in tag_dict if len(tag_dict[tag]) > 0])
-        print(tag_dict)        
-        file_handle.write(str(tag_dict) + "\n")
-        # image_description = translate(image_description)
-        # print(image_description)
-
-        # Step 2 use promprGenerater get Prompts
-        # prompt_list = gen_prompts(image_description, batch_size=4)
-        # print(prompt_list)
-        # yield chatbot, history, result_list, []
-
-        # Alternative plan
-        # prompt_list = [ enhance_prompts(image_description) ] * 4
-        prompt_list = tag_extract(tag_dict)
-        print(prompt_list[0])
-        file_handle.write("\n".join(["Prompt:"+p[0]+"\nNegative Prompt:"+p[1] for p in prompt_list]))
-
-        # Show Prompts
-        prompt_text = "\n\n Prompt:\n\n " + str(prompt_list[0][0]) + "\n\nNegative Prompt: \n\n" + str(prompt_list[0][1])
-        chatbot[-1] = (chatbot[-1][0], chatbot[-1][1] + prompt_text)
-
-
-        file_handle.close()
-        prompt_list = [prompt_list[0]]
-        # Step 3 use SD get images
-        for pos_prompt, neg_prompt in prompt_list:
-            new_images = call_sd_t2i(userID, pos_prompt, neg_prompt, width, height, steps, cfg, user_input)
-            result_list = result_list + new_images
-            yield chatbot, history, result_list, new_images
-        yield chatbot, history, result_list, result_list
