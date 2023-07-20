@@ -56,5 +56,6 @@ with gr.Blocks(title="ArtAgent ChatBot") as demo:
 
     emptyBtn.click(reset_state, [chatbot, userID], [chatbot, history, cnt], show_progress=True)
 
+
 os.makedirs('output', exist_ok=True)
-demo.queue().launch(share=True, inbrowser=True, server_name='127.0.0.1', server_port=7006, favicon_path="./favicon.ico")
+demo.queue().launch(share=True, inbrowser=True, server_name='127.0.0.1', server_port=6006, favicon_path="./favicon.ico")
