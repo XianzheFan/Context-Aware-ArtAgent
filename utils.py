@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import os
 import requests, re, json, io, base64, os
 import mdtex2html
@@ -7,13 +8,16 @@ from promptgen import *
 import time
 import random
 import re
-from io import BytesIO
 from PIL import Image
 import base64
-from tqdm import tqdm
 import cv2
 import openai
 import numpy as np
+from fastapi import FastAPI, Request
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+from typing import List, Dict
+import uuid
 
 
 ART_ADVICE = "你是一个专业的艺术评论家。如果用户询问你的建议，你就根据之前的聊天记录，给用户一个绘画描述以提供灵感，以“您可以这样画这幅画”开头，要富有想象力，在150字以内，不要给出多种场景；如果用户提出自己的绘图建议，你要做出简要回答表示赞同。要使用中文回复，不要加双引号，不要说“我不具备生成图片的能力”"
@@ -30,22 +34,90 @@ def write_json(userID, output):
         f.write('\n')
 
 
-# 需要使用能够逐行解析文件的程序，每次读取并解析一行
-def gpt4_predict(input, chatbot, history, userID):
+class ChatbotData(BaseModel):
+    input: str
+    chatbot: List[str]
+    history: List[str]
+    userID: int
+
+class HistoryItem(BaseModel):
+    role: str
+    content: str
+
+class ImageRequest(BaseModel):
+    chatbot: List[List[str]]
+    history: List[Dict[str, str]]
+    # result_list: List[str]
+    userID: int
+    cnt: int
+    width: int
+    height: int
+
+app = FastAPI()
+app.mount("/static", StaticFiles(directory="static"), name="static")
+# 可以通过 URL /static/image.png 来访问文件
+@app.post("/gpt4_predict")
+def gpt4_predict(data: ChatbotData):
     """ input 是 gr.textbox(), history 是 List """
-    chatbot.append((parse_text(input), ""))
-    user_output = construct_user(str(input))
-    history.append(user_output)
+    data.chatbot.append((parse_text(data.input), ""))
+    user_output = construct_user(str(data.input))
+    data.history.append(user_output)
 
-    res = gpt4_api(ART_ADVICE, history)
+    res = gpt4_api(ART_ADVICE, data.history)
     assistant_output = construct_assistant(res)
-    history.append(assistant_output)
+    data.history.append(assistant_output)
 
-    write_json(userID, user_output)
-    write_json(userID, assistant_output)
-    print(history)
-    chatbot[-1] = (parse_text(input), parse_text(res))
-    yield chatbot, history
+    write_json(data.userID, user_output)
+    write_json(data.userID, assistant_output)
+    print(data.history)
+    data.chatbot[-1] = (parse_text(data.input), parse_text(res))
+    
+    return {"chatbot": data.chatbot, "history": data.history}
+
+# uvicorn utils:app --reload
+# uvicorn main:app --reload --port 8080  默认是8000端口，可以改成别的
+# http://127.0.0.1:8000/docs 是api文档
+
+
+@app.post("/gpt4_sd_draw")
+def gpt4_sd_draw(data: ImageRequest, request: Request):
+    image_path = "output/edit-" + str(data.userID) + ".png"
+    pos_prompt = gpt4_api(TXT2IMG_PROMPT, data.history)
+    print(f"pos_prompt: {pos_prompt}")
+    neg_prompt = gpt4_api(TXT2IMG_NEG_PROMPT, data.history)
+    print(f"neg_prompt: {neg_prompt}")
+    write_json(data.userID, construct_prompt(pos_prompt + "\n" + neg_prompt))
+    new_images = call_sd_t2i(data.userID, pos_prompt, neg_prompt, data.width, data.height)
+    
+    new_image = new_images[0]
+    new_image.save(os.path.join(image_path))  # 暂时存成edit.png
+    static_path = "static/images/" + str(uuid.uuid4()) + ".png"
+    print("图片链接 http://localhost:8000/" + static_path)
+    new_image.save(static_path)
+    # 构造URL
+    image_url = request.url_for("static", path=static_path)
+
+    if data.cnt > 0:
+        data.chatbot.append((parse_text("这张图和我的想法不一致，请修改描述。"), parse_text("抱歉，我会重新修改描述，生成新的图像。")))
+        data.history.append(construct_user("这张图和我的想法不一致，请修改描述。"))
+        data.history.append(construct_assistant("抱歉，我会重新修改描述，生成新的图像。"))
+        write_json(data.userID, construct_user("这张图和我的想法不一致，请修改描述。"))
+        write_json(data.userID, construct_assistant("抱歉，我会重新修改描述，生成新的图像。"))
+    data.cnt = data.cnt + 1
+
+    data.chatbot.append((parse_text("请基于之前的艺术讨论生成图片。"), ""))
+    response = "图像生成完毕。\n\n" + call_visualglm_api(np.array(new_image))["result"]
+
+    data.chatbot[-1] = (parse_text("请基于之前的艺术讨论生成图片。"), parse_text(response)) 
+    data.history.append(construct_user("请基于之前的艺术讨论生成图片。"))
+    data.history.append(construct_assistant(response))
+    write_json(data.userID, construct_user("请基于之前的艺术讨论生成图片。"))
+    write_json(data.userID, construct_assistant(response))
+    print(data.history)
+
+    return {"chatbot": data.chatbot, "history": data.history,
+            "image_url": str(image_url), "userID": data.userID,
+            "cnt": data.cnt, "width": data.width, "height": data.height}
 
 
 def construct_text(role, text):
@@ -263,40 +335,6 @@ def controlnet_txt2img_api(image_path, pos_prompt, userID, width, height, sample
         image.save(output_path)
         write_json(userID, construct_photo(output_path))
     return image_list
-
-
-def gpt4_sd_draw(chatbot, history, result_list, userID, cnt, width, height):
-    image_path = "output/edit-" + str(userID) + ".png"
-    pos_prompt = gpt4_api(TXT2IMG_PROMPT, history)
-    print(f"pos_prompt: {pos_prompt}")
-    neg_prompt = gpt4_api(TXT2IMG_NEG_PROMPT, history)
-    print(f"neg_prompt: {neg_prompt}")
-    write_json(userID, construct_prompt(pos_prompt + "\n" + neg_prompt))
-    new_images = call_sd_t2i(userID, pos_prompt, neg_prompt, width, height)
-    
-    new_image = new_images[0]
-    new_image.save(os.path.join(image_path))  # 暂时存成edit.png
-    result_list = [new_image] + result_list
-
-    if cnt > 0:
-        chatbot.append((parse_text("这张图和我的想法不一致，请修改描述。"), parse_text("抱歉，我会重新修改描述，生成新的图像。")))
-        history.append(construct_user("这张图和我的想法不一致，请修改描述。"))
-        history.append(construct_assistant("抱歉，我会重新修改描述，生成新的图像。"))
-        write_json(userID, construct_user("这张图和我的想法不一致，请修改描述。"))
-        write_json(userID, construct_assistant("抱歉，我会重新修改描述，生成新的图像。"))
-    cnt = cnt + 1
-
-    chatbot.append((parse_text("请基于之前的艺术讨论生成图片。"), ""))
-    response = "图像生成完毕。\n\n" + call_visualglm_api(np.array(new_image))["result"]
-
-    chatbot[-1] = (parse_text("请基于之前的艺术讨论生成图片。"), parse_text(response)) 
-    history.append(construct_user("请基于之前的艺术讨论生成图片。"))
-    history.append(construct_assistant(response))
-    write_json(userID, construct_user("请基于之前的艺术讨论生成图片。"))
-    write_json(userID, construct_assistant(response))
-    print(history)
-
-    yield chatbot, history, result_list, new_images, cnt, result_list
 
 
 def call_sd_t2i(userID, pos_prompt, neg_prompt, width, height, user_input=""):
