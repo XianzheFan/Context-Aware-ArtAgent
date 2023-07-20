@@ -19,18 +19,9 @@ import numpy as np
 ART_ADVICE = "你是一个专业的艺术评论家。如果用户询问你的建议，你就根据之前的聊天记录，给用户一个绘画描述以提供灵感，以“您可以这样画这幅画”开头，要富有想象力，在150字以内，不要给出多种场景；如果用户提出自己的绘图建议，你要做出简要回答表示赞同。要使用中文回复，不要加双引号，不要说“我不具备生成图片的能力”"
 UPLOAD_ADVICE = "你是一个专业的艺术评论家。给你关于用户图片的文字描述，你要先回复“收到图片”，接着另起一段，复述这段文字描述。然后另起一段，根据收到的文字描述，最好从增减或改变背景中的物体、变换绘画风格出发，提出专业有想象力的改进建议，不要有对比度、层次感这方面的建议。不要说“从你的描述中，您提到图片中”，而是要说“根据您上传的图片”这种类似的话。你要让用户认为图片是你自己理解的"
 CN_TXT2IMG_PROMPT = "给你用户和艺术家的艺术讨论。分析该讨论的最终结果，从增减或改变背景中的物体、变换绘画风格出发，总结出艺术讨论后图片改进方向的几个关键词，开头加上原图的关键元素，作为文生图模型的英文prompt，不超过25词，不要有高对比度这种类似的词。回复时只写出英文prompt，一定不要加双引号和中文"
-TXT2IMG_NEG_PROMPT = "给你用户和艺术家的艺术讨论。示例：用户不想画夜晚，你回复night scene；用户想画夜晚，你回复daytime。如果用户提出了想画的人、物、场景或风格，请把这些的反义词总结成英文关键词，不超过6个词。如果用户没有不想画的，就回复一个空格。一定不要加双引号，不要在开头写create或paint这种词。"
+TXT2IMG_NEG_PROMPT = "给你用户和艺术家的艺术讨论。示例：用户不想画夜晚，你回复night scene；用户想画夜晚，你回复daytime。如果用户提出了想画的人、物、场景或风格，请把这些的反义词总结成全英文关键词，不超过6个词。如果用户没有不想画的，就回复一个空格。一定不要加双引号，不要在开头写create或paint这种词。不要使用中文"
 TXT2IMG_PROMPT = "给你用户和艺术家的艺术讨论，不要回复中文。若用户认为艺术家对图像描述不正确，你应该听从用户的要求。把用户选择的绘画主题放在开头，写出用于文生图模型的全英文prompt，来画一幅画，词数在50词以内。注意，如果描述比较长，需要提取主要意象和情景；如果较短，一定在突出绘画主体的基础上，运用想象力，添加一些内容以丰富细节。一定不要加双引号，不要在开头写create或paint这种词，直接描述画面。"
 TRANLATE_IMAGE = "先说“图像生成完毕。”，然后另起一行，以“这幅画描绘了”开头，用中文写出这段英文描绘的场景，要优美流畅，不要让用户意识到你在翻译，而是认为你在点评一幅画。"
-
-
-# glm_tokenizer = AutoTokenizer.from_pretrained("./model/ChatGLM-6B", trust_remote_code=True)
-glm_tokenizer = None
-# glm_model = AutoModel.from_pretrained("./model/ChatGLM-6B", trust_remote_code=True).half().quantize(4).cuda()
-glm_model = None
-# glm_tokenizer = AutoTokenizer.from_pretrained("THUDM/chatglm-6b", trust_remote_code=True)
-# glm_model = AutoModel.from_pretrained("THUDM/chatglm-6b", trust_remote_code=True).half().cuda()
-# glm_model = glm_model.eval()
 
 
 def write_json(userID, output):
@@ -251,7 +242,8 @@ def controlnet_txt2img_api(image_path, pos_prompt, userID, width, height, sample
                     {
                         "input_image": controlnet_image_data,
                         "module": cn_module,
-                        "model": cn_model
+                        "model": cn_model,
+                        "pixel_perfect": True
                     }
                 ]
             }
@@ -274,14 +266,6 @@ def controlnet_txt2img_api(image_path, pos_prompt, userID, width, height, sample
 
 
 def gpt4_sd_draw(chatbot, history, result_list, userID, cnt, width, height):
-    if cnt > 0:
-        chatbot.append((parse_text("这张图和我的想法不一致，请修改描述。"), parse_text("抱歉，我会重新修改描述，生成新的图像。")))
-        history.append(construct_user("这张图和我的想法不一致，请修改描述。"))
-        history.append(construct_assistant("抱歉，我会重新修改描述，生成新的图像。"))
-        write_json(userID, construct_user("这张图和我的想法不一致，请修改描述。"))
-        write_json(userID, construct_assistant("抱歉，我会重新修改描述，生成新的图像。"))
-    cnt = cnt + 1
-
     image_path = "output/edit-" + str(userID) + ".png"
     pos_prompt = gpt4_api(TXT2IMG_PROMPT, history)
     print(f"pos_prompt: {pos_prompt}")
@@ -293,6 +277,14 @@ def gpt4_sd_draw(chatbot, history, result_list, userID, cnt, width, height):
     new_image = new_images[0]
     new_image.save(os.path.join(image_path))  # 暂时存成edit.png
     result_list = [new_image] + result_list
+
+    if cnt > 0:
+        chatbot.append((parse_text("这张图和我的想法不一致，请修改描述。"), parse_text("抱歉，我会重新修改描述，生成新的图像。")))
+        history.append(construct_user("这张图和我的想法不一致，请修改描述。"))
+        history.append(construct_assistant("抱歉，我会重新修改描述，生成新的图像。"))
+        write_json(userID, construct_user("这张图和我的想法不一致，请修改描述。"))
+        write_json(userID, construct_assistant("抱歉，我会重新修改描述，生成新的图像。"))
+    cnt = cnt + 1
 
     chatbot.append((parse_text("请基于之前的艺术讨论生成图片。"), ""))
     response = "图像生成完毕。\n\n" + call_visualglm_api(np.array(new_image))["result"]
@@ -310,7 +302,8 @@ def gpt4_sd_draw(chatbot, history, result_list, userID, cnt, width, height):
 def call_sd_t2i(userID, pos_prompt, neg_prompt, width, height, user_input=""):
     url = "http://127.0.0.1:6016"
     payload = {
-        "enable_hr": False,  # True画质更好但更慢
+        "enable_hr": True,  # True画质更好但更慢
+        # "enable_hr": False,  # True画质更好但更慢
         "denoising_strength": 0.55,
         "hr_scale": 1.5,
         "hr_upscaler": "Latent",

@@ -20,7 +20,7 @@ with gr.Blocks(title="ArtAgent ChatBot") as demo:
             with gr.Row():
                 sd_width = gr.Slider(512, 1024, value=768, step=32, label="图片宽度", interactive=True)
                 sd_height = gr.Slider(512, 1024, value=768, step=32, label="图片高度", interactive=True)
-        with gr.Column(scale=4):
+        with gr.Column(scale=3):
             with gr.Group():
                 with gr.Tab("Gallery"):
                     result_gallery = gr.Gallery(label='Output', show_label=False).style(preview=True)
@@ -39,9 +39,7 @@ with gr.Blocks(title="ArtAgent ChatBot") as demo:
     result_list = gr.State([])
     userID = gr.State(random.randint(0, 9999999))  # 用户在未刷新情况下随机给到一个id
     cnt = gr.State(0)
-    # def addID():
-    #     userID = random.randint(0, 9999999)
-    #     yield userID
+
     def click_count():
         cnt = 0
         yield cnt
